@@ -28,3 +28,4 @@ if __name__ == '__main__':
     # seg.UnetPre()
     print(seg.dir_path)
     print(123)
+    print(456)
