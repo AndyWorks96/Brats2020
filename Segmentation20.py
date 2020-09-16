@@ -27,3 +27,4 @@ if __name__ == '__main__':
     seg.FcnPre()
     # seg.UnetPre()
     print(seg.dir_path)
+    print(123)
