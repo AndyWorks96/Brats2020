@@ -7,8 +7,7 @@ from utils import str2bool, count_params
 
 class Downsample_block(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(Downsample_block, self).__init__() # 单继承，即只有一个父类
-        # super().__init__()的作用也就显而易见了，就是执行父类的构造函数，使得我们能够调用父类的属性
+        super(Downsample_block, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
@@ -86,8 +85,6 @@ if __name__ == '__main__':
     models = model.to(device)
     # solution: 1
     model = models.cpu()
-    print(nn.Module)
-    print(Downsample_block)
     summary(model,(4,160,160))
     # print(model)
     print(count_params(model))

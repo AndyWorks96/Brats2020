@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-
 import time
 import os
 import math
@@ -27,17 +26,15 @@ import torch.backends.cudnn as cudnn
 import torchvision
 from torchvision import datasets, models, transforms
 
-from dataset import Dataset
+from ThreeD_dataset import Dataset
 
-import FCN
+import unet3d
 from metrics import dice_coef, batch_iou, mean_iou, iou_score ,ppv,sensitivity
 import losses
 from utils import str2bool, count_params
 from sklearn.externals import joblib
-#from hausdorff import hausdorff_distance
-import imageio
-#import ttach as tta
 import SimpleITK as sitk
+import imageio
 
 wt_dices = []
 tc_dices = []
@@ -53,17 +50,42 @@ tc_Hausdorf = []
 et_Hausdorf = []
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--name', default=None,
+                        help='model name')
+    parser.add_argument('--mode', default=None,
+                        help='')
+
+    args = parser.parse_args()
+
+    return args
+
+#获取某个分块的位置信息（0 32 64 96 128）以及 该块属于哪个病例
+def GetPatchPosition(PatchPath):
+    npName = os.path.basename(PatchPath)
+    firstName = npName
+    overNum = npName.find(".npy")
+    npName = npName[0:overNum]
+    PeopleName = npName
+    overNum = npName.find("_")
+    while(overNum != -1):
+        npName = npName[overNum+1:len(npName)]
+        overNum = npName.find("_")
+    overNum = firstName.find("_"+npName+".npy")
+    PeopleName = PeopleName[0:overNum]
+    return int(npName),PeopleName
+
 def hausdorff_distance(lT,lP):
     labelPred=sitk.GetImageFromArray(lP, isVector=False)
     labelTrue=sitk.GetImageFromArray(lT, isVector=False)
     hausdorffcomputer=sitk.HausdorffDistanceImageFilter()
     hausdorffcomputer.Execute(labelTrue>0.5,labelPred>0.5)
-    return hausdorffcomputer.GetAverageHausdorffDistance()
-    # hausdorffcomputer.GetHausdorffDistance()
-
+    return hausdorffcomputer.GetAverageHausdorffDistance()#hausdorffcomputer.GetHausdorffDistance()
 
 def CalculateWTTCET(wtpbregion,wtmaskregion,tcpbregion,tcmaskregion,etpbregion,etmaskregion):
-    # 开始计算WT
+    #开始计算WT
     dice = dice_coef(wtpbregion,wtmaskregion)
     wt_dices.append(dice)
     ppv_n = ppv(wtpbregion, wtmaskregion)
@@ -91,38 +113,9 @@ def CalculateWTTCET(wtpbregion,wtmaskregion,tcpbregion,tcmaskregion,etpbregion,e
     sensitivity_n = sensitivity(etpbregion, etmaskregion)
     et_sensitivities.append(sensitivity_n)
 
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--name', default=None,
-                        help='model name')
-    parser.add_argument('--mode', default=None,
-                        help='')
-
-    args = parser.parse_args()
-
-    return args
-
-
-def GetPatchPosition(PatchPath):
-    npName = os.path.basename(PatchPath)
-    firstName = npName
-    overNum = npName.find(".npy")
-    npName = npName[0:overNum]
-    PeopleName = npName
-    overNum = npName.find("_")
-    while(overNum != -1):
-        npName = npName[overNum+1:len(npName)]
-        overNum = npName.find("_")
-    overNum = firstName.find("_"+npName+".npy")
-    PeopleName = PeopleName[0:overNum]
-    return int(npName),PeopleName
-
-
 def main():
     val_args = parse_args()
-    val_args.name = 'AndyWorks_FCN8s_woDS'
+    val_args.name = 'AndyWorks_unet3d_woDS'
     args = joblib.load('models/%s/args.pkl' %val_args.name)
     if not os.path.exists('output/%s' %args.name):
         os.makedirs('output/%s' %args.name)
@@ -130,30 +123,34 @@ def main():
     for arg in vars(args):
         print('%s: %s' %(arg, getattr(args, arg)))
     print('------------')
+
     joblib.dump(args, 'models/%s/args.pkl' %args.name)
 
     # create model
     print("=> creating model %s" %args.arch)
-    model = FCN.__dict__[args.arch](args)
+    model = unet3d.__dict__[args.arch](args)
+
+    # model = model.cuda()
     # solution: 0
     device = 'cpu'
     models = model.to(device)
     # solution: 1
     model = models.cpu()
-    # model = model.cuda()
 
     # Data loading code
-    # img_paths = glob(r'D:\Project\CollegeDesign\dataset\Brats2018FoulModel2D\testImage\*')
-    # mask_paths = glob(r'D:\Project\CollegeDesign\dataset\Brats2018FoulModel2D\testMask\*')
-    img_paths = glob('./data/testImageDcm/*')
-    mask_paths = glob('./data/testMaskDcm/*')
+
+    img_paths = glob('./data/test3DImage/*')
+    mask_paths = glob('./data/test3DMask/*')
+
     val_img_paths = img_paths
     val_mask_paths = mask_paths
+
+    #train_img_paths, val_img_paths, train_mask_paths, val_mask_paths = \
+    #   train_test_split(img_paths, mask_paths, test_size=0.2, random_state=41)
 
     # model.load_state_dict(torch.load('models/%s/model.pth' %args.name))
     model.load_state_dict(torch.load('models/%s/model.pth' % args.name, map_location=lambda storage, loc: storage))
     model.eval()
-    # model = tta.SegmentationTTAWrapper(model, tta.aliases.d4_transform(), merge_mode='mean')
 
     val_dataset = Dataset(args, val_img_paths, val_mask_paths)
     val_loader = torch.utils.data.DataLoader(
@@ -177,43 +174,44 @@ def main():
 
                 inputs = input.to(device)
                 input = inputs.cpu()
-
                 output = model(input)
                 output = torch.sigmoid(output).data.cpu().numpy()
                 target = target.data.cpu().numpy()
                 img_paths = val_img_paths[args.batch_size * mynum:args.batch_size * (mynum + 1)]
+                #print(len(val_loader))
                 for i in range(output.shape[0]):
-                    if (startFlag == 1):# 第一个块的处理
+                    if (startFlag == 1):#第一个块的处理
                         startFlag = 0
                         # 提取当前块的位置、名字
                         PatchPosition, NameNow = GetPatchPosition(img_paths[i])
                         LastName = NameNow
                         # 创建两个全黑的三维矩阵，分别分别拼接后的预测、拼接后的Mask
-                        OnePeople = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneMask = np.zeros([155, 160, 160], dtype=np.uint8)
+                        OnePeople = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneMask = np.zeros([160, 160, 160], dtype=np.uint8)
                         # 创建三个全黑的三维矩阵，分别用于预测出来的WT、TC、ET分块的拼接
-                        OneWT = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneTC = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneET = np.zeros([155, 160, 160], dtype=np.uint8)
+                        OneWT = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneTC = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneET = np.zeros([160, 160, 160], dtype=np.uint8)
                         # 创建三个全黑的三维矩阵，分别用于真实的WT、TC、ET分块的拼接
-                        OneWTMask = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneTCMask = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneETMask = np.zeros([155, 160, 160], dtype=np.uint8)
+                        OneWTMask = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneTCMask = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneETMask = np.zeros([160, 160, 160], dtype=np.uint8)
                         # 处理预测后的分块
-                        # (2, 3, 160, 160) output
-                        # 预测切片的拼接
-                        for idx in range(output.shape[2]):
-                            for idy in range(output.shape[3]):
-                                if output[i, 0, idx, idy] > 0.5:  # WT拼接
-                                    OneWT[PatchPosition , idx, idy] = 1
-                                if output[i, 1, idx, idy] > 0.5:  # TC拼接
-                                    OneTC[PatchPosition , idx, idy] = 1
-                                if output[i, 2, idx, idy] > 0.5:  # ET拼接
-                                    OneET[PatchPosition , idx, idy] = 1
+                        # (2, 3, 32, 160, 160) output
+                        # 预测分块的拼接
+                        for idz in range(output.shape[2]):
+                            for idx in range(output.shape[3]):
+                                for idy in range(output.shape[4]):
+                                    if output[i, 0, idz, idx, idy] > 0.5:  # WT拼接
+                                        OneWT[PatchPosition + idz, idx, idy] = 1
+                                    if output[i, 1, idz, idx, idy] > 0.5:  # TC拼接
+                                        OneTC[PatchPosition + idz, idx, idy] = 1
+                                    if output[i, 2, idz, idx, idy] > 0.5:  # ET拼接
+                                        OneET[PatchPosition + idz, idx, idy] = 1
                         # Mask分块的拼接
-                        OneWTMask[PatchPosition, :, :] = target[i, 0, :, :]
-                        OneTCMask[PatchPosition, :, :] = target[i, 1, :, :]
-                        OneETMask[PatchPosition, :, :] = target[i, 2, :, :]
+                        OneWTMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 0, :, :, :]
+                        OneTCMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 1, :, :, :]
+                        OneETMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 2, :, :, :]
                     # 提取当前块的位置、名字
                     PatchPosition, NameNow = GetPatchPosition(img_paths[i])
                     if (NameNow != LastName):
@@ -230,52 +228,53 @@ def main():
                                     if (OneET[idz, idx, idy] == 1):
                                         OnePeople[idz, idx, idy] = 4
                         SavePeoPle = np.zeros([155, 240, 240], dtype=np.uint8)
-                        SavePeoPle[:, 40:200, 40:200] = OnePeople[:, :, :]
+                        SavePeoPle[:, 40:200, 40:200] = OnePeople[3:158, :, :]
                         saveout = sitk.GetImageFromArray(SavePeoPle)
                         sitk.WriteImage(saveout, savedir + LastName + ".nii.gz")
-                        return SavePeoPle
 
                         LastName = NameNow
                         # 创建两个全黑的三维矩阵，分别分别拼接后的预测、拼接后的Mask
-                        OnePeople = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneMask = np.zeros([155, 160, 160], dtype=np.uint8)
+                        OnePeople = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneMask = np.zeros([160, 160, 160], dtype=np.uint8)
                         # 创建三个全黑的三维矩阵，分别用于预测出来的WT、TC、ET分块的拼接
-                        OneWT = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneTC = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneET = np.zeros([155, 160, 160], dtype=np.uint8)
+                        OneWT = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneTC = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneET = np.zeros([160, 160, 160], dtype=np.uint8)
                         # 创建三个全黑的三维矩阵，分别用于真实的WT、TC、ET分块的拼接
-                        OneWTMask = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneTCMask = np.zeros([155, 160, 160], dtype=np.uint8)
-                        OneETMask = np.zeros([155, 160, 160], dtype=np.uint8)
+                        OneWTMask = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneTCMask = np.zeros([160, 160, 160], dtype=np.uint8)
+                        OneETMask = np.zeros([160, 160, 160], dtype=np.uint8)
                         # 处理预测后的分块
                         # (2, 3, 32, 160, 160) output
                         # 预测分块的拼接
-                        for idx in range(output.shape[2]):
-                            for idy in range(output.shape[3]):
-                                if output[i, 0, idx, idy] > 0.5:  # WT拼接
-                                    OneWT[PatchPosition , idx, idy] = 1
-                                if output[i, 1, idx, idy] > 0.5:  # TC拼接
-                                    OneTC[PatchPosition , idx, idy] = 1
-                                if output[i, 2, idx, idy] > 0.5:  # ET拼接
-                                    OneET[PatchPosition , idx, idy] = 1
+                        for idz in range(output.shape[2]):
+                            for idx in range(output.shape[3]):
+                                for idy in range(output.shape[4]):
+                                    if output[i, 0, idz, idx, idy] > 0.5:  # WT拼接
+                                        OneWT[PatchPosition + idz, idx, idy] = 1
+                                    if output[i, 1, idz, idx, idy] > 0.5:  # TC拼接
+                                        OneTC[PatchPosition + idz, idx, idy] = 1
+                                    if output[i, 2, idz, idx, idy] > 0.5:  # ET拼接
+                                        OneET[PatchPosition + idz, idx, idy] = 1
                         # Mask分块的拼接
-                        OneWTMask[PatchPosition, :, :] = target[i, 0, :, :]
-                        OneTCMask[PatchPosition, :, :] = target[i, 1, :, :]
-                        OneETMask[PatchPosition, :, :] = target[i, 2, :, :]
+                        OneWTMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 0, :, :, :]
+                        OneTCMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 1, :, :, :]
+                        OneETMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 2, :, :, :]
                     if (NameNow == LastName):
                         # 预测分块的拼接
-                        for idx in range(output.shape[2]):
-                            for idy in range(output.shape[3]):
-                                if output[i, 0, idx, idy] > 0.5:  # WT拼接
-                                    OneWT[PatchPosition , idx, idy] = 1
-                                if output[i, 1, idx, idy] > 0.5:  # TC拼接
-                                    OneTC[PatchPosition , idx, idy] = 1
-                                if output[i, 2, idx, idy] > 0.5:  # ET拼接
-                                    OneET[PatchPosition , idx, idy] = 1
+                        for idz in range(output.shape[2]):
+                            for idx in range(output.shape[3]):
+                                for idy in range(output.shape[4]):
+                                    if output[i, 0, idz, idx, idy] > 0.5:  # WT拼接
+                                        OneWT[PatchPosition + idz, idx, idy] = 1
+                                    if output[i, 1, idz, idx, idy] > 0.5:  # TC拼接
+                                        OneTC[PatchPosition + idz, idx, idy] = 1
+                                    if output[i, 2, idz, idx, idy] > 0.5:  # ET拼接
+                                        OneET[PatchPosition + idz, idx, idy] = 1
                         # Mask分块的拼接
-                        OneWTMask[PatchPosition, :, :] = target[i, 0, :, :]
-                        OneTCMask[PatchPosition, :, :] = target[i, 1, :, :]
-                        OneETMask[PatchPosition, :, :] = target[i, 2, :, :]
+                        OneWTMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 0, :, :, :]
+                        OneTCMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 1, :, :, :]
+                        OneETMask[PatchPosition:(PatchPosition + output.shape[2]), :, :] = target[i, 2, :, :, :]
 
                     # 最后一个分块从这里结束
                     if mynum == len(val_loader)-1:
@@ -292,9 +291,8 @@ def main():
                                     if (OneET[idz, idx, idy] == 1):
                                         OnePeople[idz, idx, idy] = 4
                         SavePeoPle = np.zeros([155, 240, 240], dtype=np.uint8)
-                        SavePeoPle[:, 40:200, 40:200] = OnePeople[:, :, :]
+                        SavePeoPle[:, 40:200, 40:200] = OnePeople[3:158, :, :]
                         saveout = sitk.GetImageFromArray(SavePeoPle)
-                        # return SavePeoPle
                         sitk.WriteImage(saveout, savedir + LastName + ".nii.gz")
 
             torch.cuda.empty_cache()
@@ -317,4 +315,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main( )
