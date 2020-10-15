@@ -1,5 +1,5 @@
 import numpy as np
-import cv2 #https://www.jianshu.com/p/f2e88197e81d
+import cv2
 import random
 
 from skimage.io import imread
